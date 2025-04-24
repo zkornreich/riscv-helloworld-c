@@ -111,16 +111,19 @@ void main() {
 /*
 Read about priv spec & actual RISCV-SBI & Native Client Trampolines
 
-Make an SBI for user mode to request M-Mode operations
+Make an SBI for user mode to request M-Mode PMP operations
 SBI Handler to apply memory permissions to pmp regions
 
-Buffer User Mode
-FFI - M mode --> make buffer read only before dropping back to user 
-passing pointer to a function which reads, prints to uart
-On function end, 
+Buffer mode in User Mode
+FFI - M mode --> make buffer read only before dropping to untrusted function, 
+passing a pointer to the NOW READ ONLY memory.
+Function 2 (untrusted) reads buffer prints to uart.
+Function 2 ends --> Set buffer to read/write. Modify buffer contents, print new content
+then protect again and pass to untrusted function 3. This function should attempt an
+illegal write, which should activate the trap.
 
-
-How to preven functions from making another SBI call to remove permission restrictions
+NEXT WEEK: 
+How to prevent functions from making another SBI call to remove permission restrictions
 Restrict inner function from making an SBI call
 
 SBI Call uses PC to determine if a restricted function attempted call
