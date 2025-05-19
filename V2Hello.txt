@@ -1,0 +1,135 @@
+#include <stdint.h>
+#define UART0_BASE 0x10000000
+
+// UART Definitions
+#define REG(base, offset) (*((volatile unsigned char *)(base + offset)))
+#define UART0_DR    REG(UART0_BASE, 0x00)
+#define UART0_FCR   REG(UART0_BASE, 0x02)
+#define UART0_LSR   REG(UART0_BASE, 0x05)
+#define UARTFCR_FFENA 0x01
+#define UARTLSR_THRE  0x20
+#define UART0_FF_THR_EMPTY (UART0_LSR & UARTLSR_THRE)
+
+// PMP Definitions
+#define PMP_R 0x01
+#define PMP_W 0x02
+#define PMP_X 0x04
+#define PMP_NAPOT 0x18
+
+// Syscall IDs
+#define SYSCALL_ENABLE_PMP  1
+#define SYSCALL_DISABLE_PMP 2
+
+volatile uint32_t protected_buffer[4] __attribute__((aligned(16))) = {1, 2, 3, 4};
+
+// UART Driver
+void uart_putc(char c) {
+  while (!UART0_FF_THR_EMPTY);
+  UART0_DR = c;
+}
+
+void uart_puts(const char *str) {
+  while (*str) uart_putc(*str++);
+}
+
+// PMP Configuration
+void setup_pmp_region(uintptr_t addr, uintptr_t size) {
+  uintptr_t pmpaddr = ((addr >> 2) | ((size / 2 - 1) >> 3));
+  asm volatile("li t0, 0\n csrw pmpcfg0, t0");
+  asm volatile("csrw pmpaddr0, %0" :: "r"(pmpaddr));
+  uint8_t cfg = PMP_NAPOT; // no permissions
+  asm volatile("csrw pmpcfg0, %0" :: "r"(cfg));
+}
+
+void disable_pmp_region(uintptr_t addr, uintptr_t size) {
+  uintptr_t pmpaddr = ((addr >> 2) | ((size / 2 - 1) >> 3));
+  asm volatile("csrw pmpaddr0, %0" :: "r"(pmpaddr));
+  uint8_t cfg = PMP_R | PMP_W | PMP_NAPOT;
+  asm volatile("csrw pmpcfg0, %0" :: "r"(cfg));
+}
+
+// Syscall from U-mode
+void syscall(uint32_t id) {
+  register uint32_t a7 asm("a7") = id;
+  asm volatile("ecall" :: "r"(a7));
+}
+
+// User Mode
+void user_code() {
+  uart_puts("Requesting PMP disable (RW access)\n");
+  syscall(SYSCALL_DISABLE_PMP);
+
+  uart_puts("Modifying protected buffer\n");
+  protected_buffer[0] = 42;
+
+  uart_puts("Enabling PMP (R only)\n");
+  syscall(SYSCALL_ENABLE_PMP);
+
+  uart_puts("Attempting illegal write\n");
+  protected_buffer[0] = 100; // Should trap
+
+  uart_puts("ERROR: Survived illegal write\n");
+  while (1);
+}
+
+// Trap Handler
+void trap_handler() {
+  uint32_t mcause, mepc;
+  register uint32_t syscall_id asm("a7");
+
+  asm volatile("csrr %0, mcause" : "=r"(mcause));
+  asm volatile("csrr %0, mepc" : "=r"(mepc));
+
+  if ((mcause & 0x1F) == 8) {
+    switch (syscall_id) {
+      case SYSCALL_ENABLE_PMP:
+        setup_pmp_region((uintptr_t)protected_buffer, sizeof(protected_buffer));
+        break;
+      case SYSCALL_DISABLE_PMP:
+        disable_pmp_region((uintptr_t)protected_buffer, sizeof(protected_buffer));
+        break;
+      default:
+        uart_puts("Unknown syscall ID\n");
+    }
+    mepc += 4;
+    asm volatile("csrw mepc, %0" :: "r"(mepc));
+    return;
+  }
+
+  uart_puts("TRAP CAUGHT - VIOLATION HANDLED\n");
+  while (1);
+}
+
+// Trap Initialization
+void init_trap() {
+  asm volatile("csrw mtvec, %0" :: "r"(trap_handler));
+}
+
+// Transition to U-mode
+void enter_user_mode(void (*user_fn)()) {
+  uintptr_t user_stack = 0x81000000;
+  uintptr_t mstatus;
+  asm volatile("csrr %0, mstatus" : "=r"(mstatus));
+  mstatus = (mstatus & ~0x1800);
+  asm volatile(
+    "csrw mepc, %0\n"
+    "csrw mstatus, %1\n"
+    "mv sp, %2\n"
+    "mret"
+    :: "r"(user_fn), "r"(mstatus), "r"(user_stack)
+  );
+}
+
+void main() {
+  UART0_FCR = UARTFCR_FFENA;
+  uart_puts("Hello World!\n");
+  uart_puts("Init Trap\n");
+  init_trap();
+  uart_puts("Setup PMP\n");
+  setup_pmp_region((uintptr_t)protected_buffer, sizeof(protected_buffer));
+  uart_puts("Entering U-mode\n");
+  enter_user_mode(user_code);
+
+  uart_puts("Should never reach here\n");
+  while (1);
+}

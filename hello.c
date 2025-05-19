@@ -16,6 +16,7 @@
 #define PMP_W 0x02
 #define PMP_X 0x04
 #define PMP_NAPOT 0x18
+#define PMP_LOCK 0x80
 static inline void write_csr(const char* csr_name, uintptr_t value);
 volatile uint32_t protected_buffer[4] __attribute__((aligned(16))) = {1, 2, 3, 4};
 
@@ -31,81 +32,151 @@ void uart_puts(const char *str) {
   }
 }
 
+void uart_put_hex_nibble(uint8_t nibble) {
+  if (nibble < 10)
+      uart_putc('0' + nibble);
+  else
+      uart_putc('A' + (nibble - 10));
+}
+
+void uart_put_hex32(uint32_t value) {
+  for (int i = 7; i >= 0; i--) {
+      uint8_t nibble = (value >> (i * 4)) & 0xF;
+      uart_put_hex_nibble(nibble);
+  }
+}
+
+void print_hex(const char *label, uint32_t value) {
+  uart_puts(label);
+  uart_puts("0x");
+  uart_put_hex32(value);
+  uart_putc('\n');
+}
+
 // PMP Interface Functions
 void setup_pmp_region(uintptr_t addr, uintptr_t size) {
-    // NAPOT encoding: region size must be power of 2 and >= 8 bytes
     uintptr_t pmpaddr = ((addr >> 2) | ((size / 2 - 1) >> 3));
-
-    // Configure PMP0 to no-access region (no R/W/X)
-    asm volatile (
-        "li t0, 0\n"
-        "csrw pmpcfg0, t0\n"
-    );
 
     // Set PMP0 address
     asm volatile (
         "csrw pmpaddr0, %0\n" :: "r"(pmpaddr)
     );
 
-    // Configure PMP0 as NAPOT with no permissions
-    uint8_t cfg = PMP_NAPOT; // no R/W/X
+    // Configure PMP0 as NAPOT with no R/W/X
+    //uint8_t cfg = PMP_NAPOT | PMP_LOCK;
+    uint8_t cfg = PMP_NAPOT;
     asm volatile (
         "csrw pmpcfg0, %0\n" :: "r"(cfg)
     );
 }
 
+// // PMP Interface Functions
+// void setup_user_region(uintptr_t addr, uintptr_t size) {
+//   uintptr_t pmpaddr = ((addr >> 2) | ((size / 2 - 1) >> 3));
+//   print_hex("pmpaddr: ", pmpaddr);
+//   // Set PMP0 address
+//   asm volatile (
+//       "csrw pmpaddr1, %0\n" :: "r"(pmpaddr)
+//   );
+
+//   // Configure PMP0 as NAPOT with no R/W/X
+//   uint8_t cfg = PMP_R | PMP_X | PMP_NAPOT; 
+//   asm volatile (
+//       "csrw pmpcfg1, %0\n" :: "r"(cfg)
+//   );
+// }
+
 void enter_user_mode(void (*user_fn)()) {
-    uintptr_t user_stack = 0x81000000; // pick an address you didn't PMP-protect
-    uintptr_t mstatus;
+    uintptr_t user_stack = 0x81020000; 
+    uintptr_t mstatus = 1;
+    uint32_t mepc;
     asm volatile ("csrr %0, mstatus" : "=r"(mstatus));
+    // print_hex("mstatus before clear: ", mstatus);
 
     // Clear MPP bits [12:11], set to 00 (U-mode)
-    mstatus = (mstatus & ~0x1800);
+    mstatus = ((mstatus & ~0x1800) | (1<<7));
 
-    asm volatile (
-        "csrw mepc, %0\n"
-        "csrw mstatus, %1\n"
-        "mv sp, %2\n"
-        "mret\n"
-        :: "r"(user_fn), "r"(mstatus), "r"(user_stack)
-    );
+    uart_puts("Dropping to User Mode\n");
+    // print_hex("user_fn address: ", (uintptr_t)user_fn);
+    // print_hex("mstatus post clear: ", mstatus);
+
+    // asm volatile (
+    //     "csrw mepc, %0\n"
+    //     "csrw mstatus, %1\n"
+    //     "mv sp, %2\n"
+    //     "mret\n"
+    //     :: "r"(user_fn), "r"(mstatus), "r"(user_stack)
+    // );
+
+    // Set mepc to user function
+    asm volatile("csrw mepc, %0" :: "r"((uint32_t) user_fn));
+    // asm volatile("li t0, 0x800002F4; csrw mepc, t0");
+
+    // Set mstatus to drop to U-mode
+    asm volatile("csrw mstatus, %0" :: "r"(mstatus));
+    asm volatile("csrr %0, mstatus" : "=r"(mstatus));
+    print_hex("mstatus after write: ", mstatus);
+
+    // Set user stack pointer
+    asm volatile("mv sp, %0" :: "r"(user_stack));
+    asm volatile("csrr %0, mepc"   : "=r"(mepc));
+    print_hex("MEPC: ", mepc);
+
+    // Enter user mode
+    // setup_user_region(user_fn, 0x20);
+    asm volatile("mret");
+    asm volatile ("csrr %0, mstatus" : "=r"(mstatus));
+    print_hex("mstatus after write: ", mstatus);
 }
 
 void user_code() {
-    volatile uint32_t value = protected_buffer[0];  // Should trap
-    uart_puts("SURVIVED :( \n");
-    while (1); // If we survive, loop here
+  // volatile uint32_t value = protected_buffer[0];  // Should trap
+  uart_puts("SURVIVED :( \n");
+  while (1);
 }
 
 void trap_handler() {
-    uint32_t mcause, mepc;
-    asm volatile("csrr %0, mcause" : "=r"(mcause));
-    asm volatile("csrr %0, mepc" : "=r"(mepc));
-    // You can inspect mcause for fault code: 0x0000000d = load access fault
+  uint32_t mcause, mepc, mtval, mstatus;
+  asm volatile("csrr %0, mcause" : "=r"(mcause));
+  asm volatile("csrr %0, mepc"   : "=r"(mepc));
+  asm volatile("csrr %0, mtval"  : "=r"(mtval));
+  asm volatile("csrr %0, mstatus"  : "=r"(mstatus));
+
     
-    uart_puts("TRAP CAUGHT - VIOLATION HANDLED\n");
-    while (1);
+  uart_puts("TRAP\n");
+  print_hex("mcause: ", mcause);
+  print_hex("mepc:   ", mepc);
+  print_hex("mtval:  ", mtval);
+  print_hex("mstatus:  ", mstatus);
+  while (1);
 }
 
 void init_trap() {
     asm volatile("csrw mtvec, %0" :: "r"(trap_handler));
 }
 
-// Main
 void main() {
-  UART0_FCR = UARTFCR_FFENA;              // Set the FIFO for polled operation
-  uart_puts("Hello World!\n"); 		  // Write the string to the UART
+  // Set the FIFO for polled operation
+  UART0_FCR = UARTFCR_FFENA;
+  uart_puts("Hello World!\n");
   
+  //asm volatile ("csrr t1, sstatus");
+
+  print_hex("protected buffer start: ", (uint32_t) &protected_buffer[0]);
+  print_hex("protected buffer end: ", (uint32_t) &protected_buffer[5]);
+
   // PMP Executions
-  uart_puts("Init Trap\n");
-  init_trap(); 				// Install Trap Handler
-  uart_puts("PMP Setup\n");
+  // uart_puts("Init Trap\n");
+  init_trap();
+  // uart_puts("PMP Setup\n");
   setup_pmp_region((uintptr_t)protected_buffer, sizeof(protected_buffer)); // Set up PMP
-  uart_puts("Dropping to User Mode\n");
-  enter_user_mode(user_code);
+  // setup_pmp_region(user_code, 32);
+  // enter_user_mode(user_code);
+
+  uint32_t illegal = protected_buffer[0];
   
   uart_puts("This should never run\n"); 
-  while (1);                              // Loop forever to prevent program from ending
+  while (1);
 }
 
 /*
