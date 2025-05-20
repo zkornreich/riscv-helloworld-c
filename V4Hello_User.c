@@ -86,6 +86,71 @@ void setup_pmp_region(uintptr_t addr, uintptr_t size) {
     );
 }
 
+// // User Interface Functions
+// void setup_user_region(uintptr_t addr, uintptr_t size) {
+//   uintptr_t pmpaddr = ((addr >> 2) | ((size / 2 - 1) >> 3));
+//   // Set PMP0 address
+//   asm volatile (
+//       "csrw pmpaddr1, %0\n" :: "r"(pmpaddr)
+//   );
+
+//   // Configure PMP0 as NAPOT with R/W/X
+//   uint8_t cfg = PMP_R | PMP_W | PMP_X | PMP_NAPOT;   
+//   print_hex("cfg: ", cfg);
+//   asm volatile (
+//       "csrw pmpcfg1, %0\n" :: "r"(cfg)
+//   );
+// }
+
+// void enter_user_mode(void (*user_fn)()) {
+//     uintptr_t user_stack = 0x81020000; 
+//     uintptr_t mstatus = 1;
+//     uint32_t mepc;
+//     asm volatile ("csrr %0, mstatus" : "=r"(mstatus));
+//     // print_hex("mstatus before clear: ", mstatus);
+
+//     // Clear MPP bits [12:11], set to 00 (U-mode)
+//     mstatus = ((mstatus & ~0x1800) | (1<<7));
+
+//     uart_puts("Dropping to User Mode\n");
+//     // print_hex("user_fn address: ", (uintptr_t)user_fn);
+//     // print_hex("mstatus post clear: ", mstatus);
+
+//     // asm volatile (
+//     //     "csrw mepc, %0\n"
+//     //     "csrw mstatus, %1\n"
+//     //     "mv sp, %2\n"
+//     //     "mret\n"
+//     //     :: "r"(user_fn), "r"(mstatus), "r"(user_stack)
+//     // );
+
+//     // Set mepc to user function
+//     asm volatile("csrw mepc, %0" :: "r"((uint32_t) user_fn));
+//     // asm volatile("li t0, 0x800002F4; csrw mepc, t0");
+
+//     // Set mstatus to drop to U-mode
+//     asm volatile("csrw mstatus, %0" :: "r"(mstatus));
+//     asm volatile("csrr %0, mstatus" : "=r"(mstatus));
+//     print_hex("mstatus after write: ", mstatus);
+
+//     // Set user stack pointer
+//     asm volatile("mv sp, %0" :: "r"(user_stack));
+//     asm volatile("csrr %0, mepc"   : "=r"(mepc));
+//     print_hex("MEPC: ", mepc);
+
+//     // Enter user mode
+//     // setup_user_region(user_fn, 0x20);
+//     asm volatile("mret");
+//     asm volatile ("csrr %0, mstatus" : "=r"(mstatus));
+//     print_hex("mstatus after mret: ", mstatus);
+// }
+
+// void user_code() {
+//   // volatile uint32_t value = protected_buffer[0];  // Should trap
+//   uart_puts("SURVIVED :( \n");
+//   while (1);
+// }
+
 void trap_handler() {
   uint32_t mcause, mepc, mtval, mstatus;
   asm volatile("csrr %0, mcause" : "=r"(mcause));
@@ -111,14 +176,18 @@ void main() {
   UART0_FCR = UARTFCR_FFENA;
   uart_puts("Prog Start!\n");
 
-  uart_puts("Initialize Trap!\n");
+  // PMP Executions
+  // Enable User Mode Code
+  // setup_user_region((uintptr_t) user_code, 32);
+  // uart_puts("From Main - Enter User Mode!\n");
+  // print_hex("enter_user_mode: ", (uintptr_t) enter_user_mode);
+  // setup_user_region((uintptr_t) enter_user_mode, 512);
   init_trap();
-
-  // Setup PMP regions
-  setup_pmp_region((uintptr_t)protected_buffer, sizeof(protected_buffer));
-  setup_lock_region((uintptr_t)locked_buffer, sizeof(locked_buffer));
-  
+  setup_pmp_region((uintptr_t)protected_buffer, sizeof(protected_buffer)); // Set up PMP
+  setup_lock_region((uintptr_t)locked_buffer, sizeof(locked_buffer)); // Set up PMP
   uart_puts("Read Protected (Unlocked) Buffer!\n");
+  //enter_user_mode(user_code);
+
   uint32_t illegal = protected_buffer[0];
   print_hex("protected_buffer[0] = ", illegal);
 
@@ -129,3 +198,24 @@ void main() {
   uart_puts("This should never run\n"); 
   while (1);
 }
+
+/*
+Read about priv spec & actual RISCV-SBI & Native Client Trampolines
+
+Make an SBI for user mode to request M-Mode PMP operations
+SBI Handler to apply memory permissions to pmp regions
+
+Buffer mode in User Mode
+FFI - M mode --> make buffer read only before dropping to untrusted function, 
+passing a pointer to the NOW READ ONLY memory.
+Function 2 (untrusted) reads buffer prints to uart.
+Function 2 ends --> Set buffer to read/write. Modify buffer contents, print new content
+then protect again and pass to untrusted function 3. This function should attempt an
+illegal write, which should activate the trap.
+
+NEXT WEEK: 
+How to prevent functions from making another SBI call to remove permission restrictions
+Restrict inner function from making an SBI call
+
+SBI Call uses PC to determine if a restricted function attempted call
+*/
