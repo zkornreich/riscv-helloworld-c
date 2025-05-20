@@ -71,20 +71,20 @@ void setup_pmp_region(uintptr_t addr, uintptr_t size) {
 }
 
 // // PMP Interface Functions
-// void setup_user_region(uintptr_t addr, uintptr_t size) {
-//   uintptr_t pmpaddr = ((addr >> 2) | ((size / 2 - 1) >> 3));
-//   print_hex("pmpaddr: ", pmpaddr);
-//   // Set PMP0 address
-//   asm volatile (
-//       "csrw pmpaddr1, %0\n" :: "r"(pmpaddr)
-//   );
+void setup_user_region(uintptr_t addr, uintptr_t size) {
+  uintptr_t pmpaddr = ((addr >> 2) | ((size / 2 - 1) >> 3));
+  // Set PMP0 address
+  asm volatile (
+      "csrw pmpaddr1, %0\n" :: "r"(pmpaddr)
+  );
 
-//   // Configure PMP0 as NAPOT with no R/W/X
-//   uint8_t cfg = PMP_R | PMP_X | PMP_NAPOT; 
-//   asm volatile (
-//       "csrw pmpcfg1, %0\n" :: "r"(cfg)
-//   );
-// }
+  // Configure PMP0 as NAPOT with R/W/X
+  uint8_t cfg = PMP_R | PMP_W | PMP_X | PMP_NAPOT;   
+  print_hex("cfg: ", cfg);
+  asm volatile (
+      "csrw pmpcfg1, %0\n" :: "r"(cfg)
+  );
+}
 
 void enter_user_mode(void (*user_fn)()) {
     uintptr_t user_stack = 0x81020000; 
@@ -126,7 +126,7 @@ void enter_user_mode(void (*user_fn)()) {
     // setup_user_region(user_fn, 0x20);
     asm volatile("mret");
     asm volatile ("csrr %0, mstatus" : "=r"(mstatus));
-    print_hex("mstatus after write: ", mstatus);
+    print_hex("mstatus after mret: ", mstatus);
 }
 
 void user_code() {
@@ -158,22 +158,26 @@ void init_trap() {
 void main() {
   // Set the FIFO for polled operation
   UART0_FCR = UARTFCR_FFENA;
-  uart_puts("Hello World!\n");
+  uart_puts("Prog Start!\n");
+
   
-  //asm volatile ("csrr t1, sstatus");
+  asm volatile ("csrr t1, sstatus");
 
   print_hex("protected buffer start: ", (uint32_t) &protected_buffer[0]);
   print_hex("protected buffer end: ", (uint32_t) &protected_buffer[5]);
 
   // PMP Executions
-  // uart_puts("Init Trap\n");
+  // Enable User Mode Code
+  // setup_user_region((uintptr_t) user_code, 32);
+  // uart_puts("From Main - Enter User Mode!\n");
+  print_hex("enter_user_mode: ", (uintptr_t) enter_user_mode);
+  setup_user_region((uintptr_t) enter_user_mode, 512);
   init_trap();
-  // uart_puts("PMP Setup\n");
   setup_pmp_region((uintptr_t)protected_buffer, sizeof(protected_buffer)); // Set up PMP
-  // setup_pmp_region(user_code, 32);
-  // enter_user_mode(user_code);
+  uart_puts("From Main - Enter User Mode!\n");
+  enter_user_mode(user_code);
 
-  uint32_t illegal = protected_buffer[0];
+  // uint32_t illegal = protected_buffer[0];
   
   uart_puts("This should never run\n"); 
   while (1);
