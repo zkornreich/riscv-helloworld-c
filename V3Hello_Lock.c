@@ -19,6 +19,7 @@
 #define PMP_LOCK 0x80
 static inline void write_csr(const char* csr_name, uintptr_t value);
 volatile uint32_t protected_buffer[4] __attribute__((aligned(16))) = {1, 2, 3, 4};
+volatile uint32_t locked_buffer[4] __attribute__((aligned(16))) = {5, 6, 7, 8};
 
 // Uart Driver Functions
 void uart_putc(char c) {
@@ -54,7 +55,7 @@ void print_hex(const char *label, uint32_t value) {
 }
 
 // PMP Interface Functions
-void setup_pmp_region(uintptr_t addr, uintptr_t size) {
+void setup_lock_region(uintptr_t addr, uintptr_t size) {
     uintptr_t pmpaddr = ((addr >> 2) | ((size / 2 - 1) >> 3));
 
     // Set PMP0 address
@@ -63,10 +64,25 @@ void setup_pmp_region(uintptr_t addr, uintptr_t size) {
     );
 
     // Configure PMP0 as NAPOT with no R/W/X
+    //uint8_t cfg = PMP_NAPOT | PMP_LOCK;
     uint8_t cfg = PMP_NAPOT | PMP_LOCK;
-    //uint8_t cfg = PMP_NAPOT;
     asm volatile (
         "csrw pmpcfg0, %0\n" :: "r"(cfg)
+    );
+}
+
+void setup_pmp_region(uintptr_t addr, uintptr_t size) {
+    uintptr_t pmpaddr = ((addr >> 2) | ((size / 2 - 1) >> 3));
+
+    // Set PMP0 address
+    asm volatile (
+        "csrw pmpaddr1, %0\n" :: "r"(pmpaddr)
+    );
+
+    // Configure PMP0 as NAPOT with no R/W/X and LOCK
+    uint8_t cfg = PMP_NAPOT;
+    asm volatile (
+        "csrw pmpcfg1, %0\n" :: "r"(cfg)
     );
 }
 
@@ -93,18 +109,30 @@ void init_trap() {
 void main() {
   // Set the FIFO for polled operation
   UART0_FCR = UARTFCR_FFENA;
-  uart_puts("Hello World!\n");
-  
-  asm volatile ("csrr t1, sstatus");
-
-  // PMP Executions
-  uart_puts("Init Trap\n");
+  uart_puts("Prog Start!\n");
   init_trap();
-  uart_puts("PMP Setup\n");
-  setup_pmp_region((uintptr_t)protected_buffer, sizeof(protected_buffer)); // Set up PMP
 
+  // Setup PMP regions
+  setup_pmp_region((uintptr_t)protected_buffer, sizeof(protected_buffer));
+  setup_lock_region((uintptr_t)locked_buffer, sizeof(locked_buffer));
+  
+  uart_puts("Read Protected (Unlocked) Buffer!\n");
   uint32_t illegal = protected_buffer[0];
+  print_hex("protected_buffer[0] = ", illegal);
+
+  uart_puts("Read Locked Buffer!\n");
+  illegal = locked_buffer[0];
+  print_hex("locked_buffer[0] = ", illegal);
   
   uart_puts("This should never run\n"); 
   while (1);
 }
+
+/* 
+Locked memory has to be in pmp CSRs before unlocked registers for locking to take place
+
+TEE - Trusted Execution Environment
+Protect user programs from the OS/Firmware itself
+
+seL4
+*/
